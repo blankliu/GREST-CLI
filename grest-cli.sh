@@ -292,13 +292,212 @@ function __get_branch() {
     fi
 }
 
-function init_command_context() {
-    CMD_USAGE_MAPPING["get-branch"]="__print_usage_of_get_branch"
+function __print_usage_of_create_branch() {
+    cat << EOU
+SYNOPSIS
+    1. $SCRIPT_NAME create-branch -p <PROJECT> -b <BRANCH> -r <REVISION>
+    2. $SCRIPT_NAME create-branch -f <BATCH_FILE>
 
+DESCRIPTION
+    Creates new branches for projects with given revision.
+
+    The 1st format
+        Creates a new branch <BRANCH> basing on given revision <REVISION> for
+        specified project <PROJECT>.
+
+    The 2nd format
+        Creates new branches by batches basing on given file <BATCH_FILE>.
+        Formats for file <BATCH_FILE>:
+            - Each line must contain three fields which represent <PROJECT>,
+              <BRANCH> and <REVISION>
+            - Uses a whitespace to separate fields in each line
+        For example, a file <BATCH_FILE> is composed of following lines.
+            devops/ci dev master
+            devops/ci backup 45d234f9
+            devops/cd dev master
+OPTIONS
+    -p|--project <PROJECT>
+        Specify project's name.
+
+    -b|--branch <BRANCH>
+        Specify new branch's name.
+
+    -r|--revision <REVISION>
+        Specify an initial revision for the new branch. Could be a branch name
+        or a SHA-1 value.
+
+    -f|--file <BATCH_FILE>
+        A file which contains required information to create new branches.
+
+    -h|--help
+        Show this usage document.
+
+EXAMPLES
+    1. Creates a branch 'dev' from branch 'master' for project 'devops/ci'
+       $ $SCRIPT_NAME create-branch -p devops/ci -b dev -r master
+
+    2. Creates new branches using batch file named 'batch.file'
+       $ $SCRIPT_NAME create-branch -f batch.file
+EOU
+}
+
+# Creating branches
+function __create_branch() {
+    local _SUB_CMD=
+    local _PROJECT=
+    local _BRANCH=
+    local _REVISION=
+    local _BATCH_FILE=
+    local _JSON_IN_FILE=
+    local _CLI_CMD=
+    local _RES_FILE=
+    local _HTTP_CODE=
+    local _LEN_MAX_P=
+    local _LEN_MAX_B=
+    local _TMP_P=
+    local _TMP_B=
+    local _REV_MAPPING=
+    local _RET_VALUE=
+
+    declare -A _REV_MAPPING
+
+    _SUB_CMD="create-branch"
+    _RET_VALUE=0
+
+    if [[ $# -eq 0 ]]; then
+        eval "${CMD_USAGE_MAPPING[$_SUB_CMD]}"
+        return $_RET_VALUE
+    fi
+
+    _ARGS=$(getopt ${CMD_OPTION_MAPPING[$_SUB_CMD]} -- $@)
+    eval set -- "$_ARGS"
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -p|--project)
+                _PROJECT=$2
+                ;;
+            -b|--branch)
+                _BRANCH=$2
+                ;;
+            -r|--revision)
+                _REVISION=$2
+                ;;
+            -f|--file)
+                _BATCH_FILE=$2
+                if [ ! -f "$PWD/$_BATCH_FILE" ]; then
+                    log_e "file not found: $_BATCH_FILE"
+                    return $ERROR_CODE_BATCH_FILE_NOT_FOUND
+                fi
+                ;;
+            -h|--help)
+                eval "${CMD_USAGE_MAPPING[$_SUB_CMD]}"
+                return $_RET_VALUE
+                ;;
+            --)
+                shift
+                break
+                ;;
+        esac
+        shift
+    done
+
+    if [ -n "$_BATCH_FILE" ]; then
+        if [ -n "$_PROJECT" ] || [ -n "$_BRANCH" ] || [ -n "$_REVISION" ]; then
+            log_e "option -f|--file is exclusive with options -p|--project," \
+                "-b|--branch and -r|--revision"
+            return $ERROR_CODE_INVALID_OPTIONS_FOUND
+        fi
+    else
+        if [ -z "$_PROJECT" ] || [ -z "$_BRANCH" ] || [ -z "$_REVISION" ]; then
+            log_e "options -p|--project, -b|--project and -r|--revision" \
+                "must be provided together"
+            return $ERROR_CODE_INVALID_OPTIONS_FOUND
+        fi
+    fi
+
+    if [ -z "$_BATCH_FILE" ]; then
+        _BATCH_FILE=$(mktemp -p "/tmp" --suffix ".batch" "combo.XXX")
+        echo "$_PROJECT $_BRANCH $_REVISION" > $_BATCH_FILE
+    fi
+
+    # Length of word "Project": 7
+    # Length of word "Branch": 6
+    _LEN_MAX_P=7
+    _LEN_MAX_B=6
+    while read _PROJECT _BRANCH _REVISION; do
+        log_i "handling project: $_PROJECT"
+
+        if [ "${#_PROJECT}" -gt "$_LEN_MAX_P" ]; then
+            _LEN_MAX_P=${#_PROJECT}
+        fi
+
+        if [ "${#_BRANCH}" -gt "$_LEN_MAX_B" ]; then
+            _LEN_MAX_B=${#_BRANCH}
+        fi
+
+        _TMP_P=$_PROJECT
+        _TMP_B=$_BRANCH
+        _PROJECT=$(__covert_name "$_PROJECT")
+        _BRANCH=$(__covert_name "$_BRANCH")
+
+        _JSON_IN_FILE=$(mktemp -p "/tmp" --suffix ".json" "combo.XXX")
+        jq -n --arg revision $_REVISION '{revision: $revision}' > $_JSON_IN_FILE
+
+        _RES_FILE="response"
+        _CLI_CMD="$CURL_PUT -w '%{http_code}' \
+            -o $_RES_FILE \
+            --data-binary @$_JSON_IN_FILE \
+            --header \"Content-Type: application/json\" \
+            $ENDPOINT_PROJECTS/$_PROJECT/branches/$_BRANCH"
+        _HTTP_CODE=$(eval "$_CLI_CMD")
+        if __analyse_http_code "$_HTTP_CODE"; then
+            log_i "branch created: $_TMP_B -> $_REVISION"
+            _REV_MAPPING["${_TMP_P}${_TMP_B}"]=$(tail -n+2 "$_RES_FILE" | \
+                jq -r ".revision")
+        else
+            log_e "unable to create branch: $_TMP_B"
+            export -f log_e
+            cat "$_RES_FILE" | xargs -d "\n" -I {} bash -c 'log_e "$@"' _ {}
+            _REV_MAPPING["${_TMP_P}${_TMP_B}"]="????"
+        fi
+
+        rm -f "$_RES_FILE"
+        rm -f "$_JSON_IN_FILE"
+
+        echo
+    done < "$_BATCH_FILE"
+
+    printf "%$((_LEN_MAX_P + _LEN_MAX_B + 4 + 40))s\n" "-" | sed "s| |-|g"
+    printf "%-${_LEN_MAX_P}s  %-${_LEN_MAX_B}s  %-s\n" \
+        "Project" "Branch" "Revision"
+    printf "%$((_LEN_MAX_P + _LEN_MAX_B + 4 + 40))s\n" "-" | sed "s| |-|g"
+    while read _PROJECT _BRANCH _REVISION; do
+        printf "%-${_LEN_MAX_P}s  %-${_LEN_MAX_B}s  %-s\n" \
+            "$_PROJECT" "$_BRANCH" "${_REV_MAPPING[${_PROJECT}${_BRANCH}]}"
+    done < "$_BATCH_FILE"
+    printf "%$((_LEN_MAX_P + _LEN_MAX_B + 4 + 40))s\n" "-" | sed "s| |-|g"
+
+    if [[ "$_BATCH_FILE" =~ /tmp/combo.*batch ]]; then
+        rm -f "$_BATCH_FILE"
+    fi
+
+    return $_RET_VALUE
+}
+
+function init_command_context() {
+    # Maps sub-command to its usage
+    CMD_USAGE_MAPPING["get-branch"]="__print_usage_of_get_branch"
+    CMD_USAGE_MAPPING["create-branch"]="__print_usage_of_create_branch"
+
+    # Maps sub-command to its options
     CMD_OPTION_MAPPING["get-branch"]="-o p:b:f:h\
         -l project:,branch:,file:,help"
+    CMD_OPTION_MAPPING["create-branch"]="-o p:b:r:f:h\
+        -l project:,branch:,revision:,file:,help"
 
+    # Maps sub-command to the implementation of its function
     CMD_FUNCTION_MAPPING["get-branch"]="__get_branch"
+    CMD_FUNCTION_MAPPING["create-branch"]="__create_branch"
 }
 
 function enable_verbose_mode() {
@@ -312,6 +511,8 @@ Usage: $SCRIPT_NAME [-v] <SUB_COMMAND> [<args>]
 A CLI tool which implements customized functions using Gerrit REST API.
 1. get-branch
    Gets revision value according to a project-branch combination.
+2. create-branch
+   Creates branches according to provided information.
 
 To show usage of a <SUB_COMMAND>, use following command:
    $SCRIPT_NAME help <SUB_COMMAND>
