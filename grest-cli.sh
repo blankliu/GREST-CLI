@@ -24,6 +24,8 @@ ERROR_CODE_COMMAND_NOT_SUPPORTED=2
 ERROR_CODE_UNAUTHORIZED_ACCOUNT_FOUND=3
 ERROR_CODE_BATCH_FILE_NOT_FOUND=4
 ERROR_CODE_INVALID_OPTIONS_FOUND=5
+ERROR_CODE_PROJECT_NOT_FOUND=5
+ERROR_CODE_BRANCH_NOT_FOUND=6
 
 function log_i() {
     echo -e "Info : $*"
@@ -484,20 +486,227 @@ function __create_branch() {
     return $_RET_VALUE
 }
 
+function __print_usage_of_delete_branch() {
+    cat << EOU
+SYNOPSIS
+    1. $SCRIPT_NAME delete-branch -p <PROJECT> -b <BRANCH>
+    2. $SCRIPT_NAME delete-branch -f <BATCH_FILE>
+
+DESCRIPTION
+    Deletes specified branches for given projects.
+
+    The 1st format
+        Delete a specified branch <BRANCH> basing on given project <PROJECT>.
+
+    The 2nd format
+        Deletes branches by batches basing on a given file <BATCH_FILE>.
+        Formats for file <BATCH_FILE>:
+            - Each line must contain two fields which represent <PROJECT>,
+              <BRANCH>
+            - Uses a whitespace to separate fields in each line
+        For example, a <BATCH_FILE> is composed of following three lines:
+            devops/ci master
+            devops/ci dev
+            devops/cd master
+OPTIONS
+    -p|--project <PROJECT>
+        Specify the project's name.
+
+    -b|--branch <BRANCH>
+        Specify the branch's name.
+
+    -f|--file <BATCH_FILE>
+        A file which contains required information to delete branches.
+
+    -h|--help
+        Show this usage document.
+
+EXAMPLES
+    1. Delete a branch called 'dev' for project 'devops/ci'.
+       $ $SCRIPT_NAME delete-branch -p devops/ci -b dev
+
+    2. Delete specified branches using batch file named 'batch.file'
+       $ $SCRIPT_NAME delete-branch -f batch.file
+EOU
+}
+
+# Delete branches
+function __delete_branch() {
+    local _SUB_CMD=
+    local _PROJECT=
+    local _BRANCH=
+    local _BATCH_FILE=
+    local _JSON_IN_FILE=
+    local _JSON_DATA=
+    local _CLI_CMD=
+    local _HTTP_CODE=
+    local _RES_FILE=
+    local _P_COUNT=
+    local _LEN_MAX_P=
+    local _LEN_MAX_B=
+    local _TMP_P=
+    local _TMP_B=
+    local _BR_MAPPING=
+    local _RET_VALUE=
+
+    declare -A _BR_MAPPING
+
+    _SUB_CMD="delete-branch"
+    _RET_VALUE=0
+
+    if [[ $# -eq 0 ]]; then
+        eval "${CMD_USAGE_MAPPING[$_SUB_CMD]}"
+        return $_RET_VALUE
+    fi
+
+    _ARGS=$(getopt ${CMD_OPTION_MAPPING[$_SUB_CMD]} -- $@)
+    eval set -- "$_ARGS"
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            -p|--project)
+                _PROJECT=$2
+                ;;
+            -b|--branch)
+                _BRANCH=$2
+                ;;
+            -f|--file)
+                _BATCH_FILE=$2
+                if [ ! -f "$PWD/$_BATCH_FILE" ]; then
+                    log_e "file not found: $_BATCH_FILE"
+                    return $ERROR_CODE_BATCH_FILE_NOT_FOUND
+                fi
+                ;;
+            -h|--help)
+                eval "${CMD_USAGE_MAPPING[$_SUB_CMD]}"
+                return $_RET_VALUE
+                ;;
+            --)
+                shift
+                break
+                ;;
+        esac
+        shift
+    done
+
+    if [ -z "$_BATCH_FILE" ]; then
+        _TMP_P=$_PROJECT
+        _TMP_B=$_BRANCH
+
+        _PROJECT=$(__covert_name "$_PROJECT")
+        _BRANCH=$(__covert_name "$_BRANCH")
+
+        _RES_FILE="response"
+        rm -f "$_RES_FILE"
+
+        _CLI_CMD="$CURL_DELETE -w "%{http_code}" \
+            -o "$_RES_FILE" \
+            $ENDPOINT_PROJECTS/$_PROJECT/branches/$_BRANCH"
+        _HTTP_CODE=$(eval "$_CLI_CMD")
+
+        if __analyse_http_code $_HTTP_CODE; then
+            log_i "branch deleted: $_TMP_B"
+        else
+            if grep -q "$_TMP_P" $_RES_FILE; then
+                log_e "project not found: $_TMP_P"
+                _RET_VALUE=$ERROR_CODE_PROJECT_NOT_FOUND
+            else
+                log_e "branch not found: $_TMP_B"
+                _RET_VALUE=$ERROR_CODE_BRANCH_NOT_FOUND
+            fi
+        fi
+    else
+        while read _PROJECT _BRANCH; do
+            if ! echo "${!_BR_MAPPING[@]}" | grep -q "$_PROJECT"; then
+                _BR_MAPPING["$_PROJECT"]="$_BRANCH"
+            else
+                _BR_MAPPING["$_PROJECT"]="${_BR_MAPPING["$_PROJECT"]} $_BRANCH"
+            fi
+        done < "$_BATCH_FILE"
+
+        _P_COUNT=0
+        for P in $(echo ${!_BR_MAPPING[@]}); do
+            log_i "delete branches for project: $P"
+
+            _P_COUNT=$(($_P_COUNT + 1))
+            _LEN_MAX_P=${#P}
+            _LEN_MAX_B=0
+
+            _JSON_IN_FILE=$(mktemp -p "/tmp" --suffix ".json" "branches.XXX")
+            _JSON_DATA=$(jq -n '{branches: []}')
+            for B in $(echo "${_BR_MAPPING[$P]}"); do
+                if [ "${#B}" -gt "$_LEN_MAX_B" ]; then
+                    _LEN_MAX_B=${#B}
+                fi
+
+                _JSON_DATA=$(echo "$_JSON_DATA" | \
+                    jq --arg branch $B '.branches += [$branch]')
+            done
+            echo "$_JSON_DATA" | jq . > $_JSON_IN_FILE
+
+            _RES_FILE="response"
+            _PROJECT=$(__covert_name "$P")
+            _CLI_CMD="$CURL_POST -w "%{http_code}" \
+                -o "$_RES_FILE" \
+                --data-binary @$_JSON_IN_FILE \
+                --header \"Content-Type: application/json\" \
+                $ENDPOINT_PROJECTS/$_PROJECT/branches:delete"
+            _HTTP_CODE=$(eval "$_CLI_CMD")
+            if ! __analyse_http_code $_HTTP_CODE; then
+                cat "$_RES_FILE" | \
+                    xargs -d "\n" -I {} bash -c 'log_e "$@"' _ {}
+            fi
+
+            printf "%$((_LEN_MAX_P + _LEN_MAX_B + 4 + 10))s\n" "-" | sed "s| |-|g"
+            printf "%-${_LEN_MAX_P}s  %-${_LEN_MAX_B}s  %-s\n" \
+                "Project" "Branch" "Deletion"
+            printf "%$((_LEN_MAX_P + _LEN_MAX_B + 4 + 10))s\n" "-" | sed "s| |-|g"
+            for B in $(echo "${_BR_MAPPING[$P]}"); do
+                if cat "$_RES_FILE" | grep -q "$P"; then
+                    printf "%-${_LEN_MAX_P}s  %-${_LEN_MAX_B}s  %-s\n" \
+                        "$P" "$B" "NO"
+                    continue
+                fi
+
+                if cat "$_RES_FILE" | grep -q "$B"; then
+                    printf "%-${_LEN_MAX_P}s  %-${_LEN_MAX_B}s  %-s\n" \
+                        "$P" "$B" "NO"
+                else
+                    printf "%-${_LEN_MAX_P}s  %-${_LEN_MAX_B}s  %-s\n" \
+                        "$P" "$B" "YES"
+                fi
+            done
+            printf "%$((_LEN_MAX_P + _LEN_MAX_B + 4 + 10))s\n" "-" | sed "s| |-|g"
+
+            rm -f "$_RES_FILE"
+            rm -f "$_JSON_IN_FILE"
+
+            if [ $_P_COUNT -lt ${#_BR_MAPPING[@]} ]; then
+                echo
+            fi
+        done
+    fi
+
+    return $_RET_VALUE
+}
+
 function init_command_context() {
     # Maps sub-command to its usage
     CMD_USAGE_MAPPING["get-branch"]="__print_usage_of_get_branch"
     CMD_USAGE_MAPPING["create-branch"]="__print_usage_of_create_branch"
+    CMD_USAGE_MAPPING["delete-branch"]="__print_usage_of_delete_branch"
 
     # Maps sub-command to its options
     CMD_OPTION_MAPPING["get-branch"]="-o p:b:f:h\
         -l project:,branch:,file:,help"
     CMD_OPTION_MAPPING["create-branch"]="-o p:b:r:f:h\
         -l project:,branch:,revision:,file:,help"
+    CMD_OPTION_MAPPING["delete-branch"]="-o p:b:f:h\
+        -l project:,branch:,file:,help"
 
     # Maps sub-command to the implementation of its function
     CMD_FUNCTION_MAPPING["get-branch"]="__get_branch"
     CMD_FUNCTION_MAPPING["create-branch"]="__create_branch"
+    CMD_FUNCTION_MAPPING["delete-branch"]="__delete_branch"
 }
 
 function enable_verbose_mode() {
@@ -513,6 +722,8 @@ A CLI tool which implements customized functions using Gerrit REST API.
    Gets revision value according to a project-branch combination.
 2. create-branch
    Creates branches according to provided information.
+3. delete-branch
+   Deletes branches according to provided information.
 
 To show usage of a <SUB_COMMAND>, use following command:
    $SCRIPT_NAME help <SUB_COMMAND>
