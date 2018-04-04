@@ -115,14 +115,14 @@ function __ascertain_server() {
     _HTTP_CODE=$(eval "$_CLI_CMD")
     rm -f "$_RES_FILE"
     if ! __analyse_http_code "$_HTTP_CODE"; then
-        log_e "unauthorized account found in file $GRESTRC_FILE"
+        log_e "unauthorized account found in file: $GRESTRC_FILE"
         return $ERROR_CODE_UNAUTHORIZED_ACCOUNT_FOUND
     fi
 
     return 0
 }
 
-function __covert_name() {
+function __convert_name() {
     echo "$1" | sed "s|/|%2F|g"
 }
 
@@ -263,8 +263,8 @@ function __get_branch() {
 
         _TMP_P=$_PROJECT
         _TMP_B=$_BRANCH
-        _PROJECT=$(__covert_name "$_PROJECT")
-        _BRANCH=$(__covert_name "$_BRANCH")
+        _PROJECT=$(__convert_name "$_PROJECT")
+        _BRANCH=$(__convert_name "$_BRANCH")
 
         _RES_FILE="response"
         _CLI_CMD="$CURL_GET -w '%{http_code}' \
@@ -447,8 +447,8 @@ function __create_branch() {
 
         _TMP_P=$_PROJECT
         _TMP_B=$_BRANCH
-        _PROJECT=$(__covert_name "$_PROJECT")
-        _BRANCH=$(__covert_name "$_BRANCH")
+        _PROJECT=$(__convert_name "$_PROJECT")
+        _BRANCH=$(__convert_name "$_BRANCH")
 
         _JSON_IN_FILE=$(mktemp -p "/tmp" --suffix ".json" "combo.XXX")
         jq -n --arg revision $_REVISION '{revision: $revision}' > $_JSON_IN_FILE
@@ -602,8 +602,8 @@ function __delete_branch() {
         _TMP_P=$_PROJECT
         _TMP_B=$_BRANCH
 
-        _PROJECT=$(__covert_name "$_PROJECT")
-        _BRANCH=$(__covert_name "$_BRANCH")
+        _PROJECT=$(__convert_name "$_PROJECT")
+        _BRANCH=$(__convert_name "$_BRANCH")
 
         _RES_FILE="response"
         rm -f "$_RES_FILE"
@@ -654,7 +654,7 @@ function __delete_branch() {
             echo "$_JSON_DATA" | jq . > $_JSON_IN_FILE
 
             _RES_FILE="response"
-            _PROJECT=$(__covert_name "$P")
+            _PROJECT=$(__convert_name "$P")
             _CLI_CMD="$CURL_POST -w "%{http_code}" \
                 -o "$_RES_FILE" \
                 --data-binary @$_JSON_IN_FILE \
