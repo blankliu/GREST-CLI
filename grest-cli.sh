@@ -13,6 +13,8 @@ declare -A CMD_USAGE_MAPPING
 declare -A CMD_OPTION_MAPPING
 declare -A CMD_FUNCTION_MAPPING
 
+declare -a MACHINES
+declare -a CANONICAL_URLS
 GERRIT_URL=
 ENDPOINT_ACCOUNTS=
 ENDPOINT_PROJECTS=
@@ -53,26 +55,27 @@ function __analyse_http_code() {
 }
 
 function __check_config() {
-    local _MACHINES=
-    local _INDEX=
-    local _CHOICE=
-    local _MACHINE=
-    local _CANONICAL_URLS=
-    local _CLI_CMD=
-    local _RES_FILE=
-    local _HTTP_CODE=
-
     if [ ! -f "$GRESTRC_FILE" ]; then
         log_e "file not found: $GRESTRC_FILE"
         return $ERROR_CODE_GRESTRC_FILE_NOT_FOUND
     fi
 
-    _MACHINES=($(awk '/^machine/ {print $2}' "$GRESTRC_FILE"))
-    _CANONICAL_URLS=($(awk '/^canonicalurl/ {print $2}' "$GRESTRC_FILE"))
-    if [ ${#_MACHINES[@]} -gt 1 ]; then
+    MACHINES=($(awk '/^machine/ {print $2}' "$GRESTRC_FILE"))
+    CANONICAL_URLS=($(awk '/^canonicalurl/ {print $2}' "$GRESTRC_FILE"))
+}
+
+function __ascertain_server() {
+    local _INDEX=
+    local _CHOICE=
+    local _MACHINE=
+    local _CLI_CMD=
+    local _RES_FILE=
+    local _HTTP_CODE=
+
+   if [ ${#MACHINES[@]} -gt 1 ]; then
         echo "As several Gerrit servers are provided, please choose one:"
         _INDEX=0
-        for I in ${_MACHINES[@]}; do
+        for I in ${MACHINES[@]}; do
             _INDEX=$((_INDEX + 1))
             echo "$_INDEX. $I"
         done
@@ -86,8 +89,8 @@ function __check_config() {
 
             if [ "$_CHOICE" -ge 1 ] && [ "$_CHOICE" -le "$_INDEX" ]; then
                 _INDEX=$((_CHOICE - 1))
-                _MACHINE=${_MACHINES[$_INDEX]}
-                GERRIT_URL="${_CANONICAL_URLS[$_INDEX]}/a"
+                _MACHINE=${MACHINES[$_INDEX]}
+                GERRIT_URL="${CANONICAL_URLS[$_INDEX]}/a"
                 echo
                 break
             else
@@ -96,8 +99,8 @@ function __check_config() {
             fi
         done
     else
-        _MACHINE="${_MACHINES[0]}"
-        GERRIT_URL="${_CANONICAL_URLS[0]}/a"
+        _MACHINE="${MACHINES[0]}"
+        GERRIT_URL="${CANONICAL_URLS[0]}/a"
     fi
 
     ENDPOINT_ACCOUNTS="$GERRIT_URL/accounts"
@@ -222,6 +225,8 @@ function __get_branch() {
         shift
     done
 
+    __ascertain_server || return $?
+
     if [ -n "$_BATCH_FILE" ]; then
         if [ -n "$_PROJECT" ] || [ -n "$_BRANCH" ]; then
             log_e "option -f|--file is exclusive with options -p|--project" \
@@ -274,6 +279,7 @@ function __get_branch() {
             cat "$_RES_FILE" | xargs -I {} bash -c 'log_e "$@"' _ {}
             _REV_MAPPING["$_TMP_P"]="????"
         fi
+        echo
 
         rm -f "$_RES_FILE"
     done < "$_BATCH_FILE"
@@ -402,6 +408,8 @@ function __create_branch() {
         esac
         shift
     done
+
+    __ascertain_server || return $?
 
     if [ -n "$_BATCH_FILE" ]; then
         if [ -n "$_PROJECT" ] || [ -n "$_BRANCH" ] || [ -n "$_REVISION" ]; then
@@ -587,6 +595,8 @@ function __delete_branch() {
         esac
         shift
     done
+
+    __ascertain_server || return $?
 
     if [ -z "$_BATCH_FILE" ]; then
         _TMP_P=$_PROJECT
